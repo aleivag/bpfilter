@@ -135,3 +135,9 @@ trap 'cleanup 1; exit 1' INT TERM
 get_counter() {
     ${FROM_NS} bpftool map dump pinned ${WORKDIR}/bpf/bpfilter/$1/bf_cmap | jq ".[$2].values | map(.value.count) | add"
 }
+
+# Succeed if pidfds are pidfs inodes (Linux 6.9+), which meta.pidfd needs to
+# resolve a PID to its process.
+kernel_has_pidfs() {
+    [ "$(printf '%s\n' 6.9 "$(uname -r)" | sort -V | head -n1)" = "6.9" ]
+}

@@ -99,6 +99,13 @@ Meta
       - :rspan:`1` ``$PID`` must be a decimal process ID (thread group ID), as seen from the initial PID namespace. This is the process ID reported by the log entries of ``BF_HOOK_CGROUP_SOCK_ADDR_*`` hooks, not its namespace-local counterpart. Only compatible with ``BF_HOOK_CGROUP_SOCK_ADDR_*`` hooks.
     * - ``in``
       - ``{$PID[;...]}``
+    * - :rspan:`1` Process
+      - :rspan:`1` ``meta.pidfd``
+      - ``eq``
+      - ``$PID`` or ``ino:$INODE``
+      - :rspan:`1` Identifies a process by the inode number of its pidfd, which isn't reused until the system reboots: unlike ``meta.pid``, the rule doesn't match an unrelated process that is assigned the same PID after the original one exits. ``$PID`` is the decimal process ID of a thread group leader, from the PID namespace of the process creating the rule: bpfilter resolves it to the pidfd inode number of the process when the rule is created, and prints the rule with ``ino:$INODE``. ``ino:$INODE`` is the inode number itself, e.g. from ``fstat()`` on a pidfd. Requires Linux 6.9+ (pidfs). Only compatible with ``BF_HOOK_CGROUP_SOCK_ADDR_*`` hooks.
+    * - ``in``
+      - ``{$PID|ino:$INODE[;...]}``
 
 .. note::
 

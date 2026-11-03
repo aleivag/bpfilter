@@ -12,6 +12,7 @@
 #include <linux/in6.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
+#include <linux/magic.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
 
@@ -25,6 +26,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "bpfilter/dump.h"
 #include "bpfilter/helper.h"
@@ -482,6 +488,102 @@ static void _bf_print_pid(const void *payload)
     assert(payload);
 
     (void)fprintf(stdout, "%" PRIu32, *(uint32_t *)payload);
+}
+
+// Defined by the kernel headers since Linux 6.9
+#ifndef PID_FS_MAGIC
+#define PID_FS_MAGIC 0x50494446
+#endif
+
+#define _BF_PIDFD_INO_PREFIX "ino:"
+
+static int _bf_parse_pidfd(enum bf_matcher_type type, enum bf_matcher_op op,
+                           void *payload, const char *raw_payload)
+{
+    _cleanup_close_ int pidfd = -1;
+    struct statfs fs_info;
+    struct stat pidfd_info;
+    uint64_t value;
+    char *endptr;
+    int r;
+
+    assert(payload);
+    assert(raw_payload);
+
+    // "ino:$INODE" is the inode number itself, as printed back by bpfilter
+    if (bf_strneq(raw_payload, _BF_PIDFD_INO_PREFIX,
+                  strlen(_BF_PIDFD_INO_PREFIX))) {
+        const char *raw_ino = raw_payload + strlen(_BF_PIDFD_INO_PREFIX);
+        unsigned long long ino;
+
+        errno = 0;
+        ino = strtoull(raw_ino, &endptr, BF_BASE_10);
+        if (!isdigit(*raw_ino) || *endptr != '\0' || errno == ERANGE ||
+            ino == 0) {
+            return bf_err_r(
+                -EINVAL,
+                "\"%s %s\" expects a non-zero decimal inode number after 'ino:', not '%s'",
+                bf_matcher_type_to_str(type), bf_matcher_op_to_str(op),
+                raw_payload);
+        }
+
+        value = ino;
+    } else {
+        unsigned long pid;
+
+        errno = 0;
+        pid = strtoul(raw_payload, &endptr, BF_BASE_10);
+        if (!isdigit(*raw_payload) || *endptr != '\0' || errno == ERANGE ||
+            pid == 0 || pid > INT32_MAX) {
+            return bf_err_r(
+                -EINVAL,
+                "\"%s %s\" expects a decimal process ID between 1 and %d, or 'ino:$INODE', not '%s'",
+                bf_matcher_type_to_str(type), bf_matcher_op_to_str(op),
+                INT32_MAX, raw_payload);
+        }
+
+        /* Resolve the PID to the process it designates now. pidfds are
+         * pidfs inodes, and a process keeps its inode number until the
+         * system reboots, while its PID can be reused once it exits. */
+        pidfd = (int)syscall(__NR_pidfd_open, (pid_t)pid, 0);
+        if (pidfd < 0) {
+            r = -errno;
+            return bf_err_r(r, "\"%s %s\": failed to open a pidfd for PID %lu",
+                            bf_matcher_type_to_str(type),
+                            bf_matcher_op_to_str(op), pid);
+        }
+
+        if (fstatfs(pidfd, &fs_info) < 0 || fstat(pidfd, &pidfd_info) < 0) {
+            r = -errno;
+            return bf_err_r(r, "failed to stat the pidfd of PID %lu", pid);
+        }
+
+        // Before Linux 6.9, all the pidfds share a single anonymous inode
+        if (fs_info.f_type != PID_FS_MAGIC) {
+            return bf_err_r(-ENOTSUP,
+                            "\"%s %s\" requires pidfds to be pidfs inodes "
+                            "(Linux 6.9+)",
+                            bf_matcher_type_to_str(type),
+                            bf_matcher_op_to_str(op));
+        }
+
+        value = (uint64_t)pidfd_info.st_ino;
+    }
+
+    // Set elements pack their components: `payload` might be misaligned
+    memcpy(payload, &value, sizeof(value));
+
+    return 0;
+}
+
+static void _bf_print_pidfd(const void *payload)
+{
+    uint64_t ino;
+
+    assert(payload);
+
+    memcpy(&ino, payload, sizeof(ino));
+    (void)fprintf(stdout, _BF_PIDFD_INO_PREFIX "%" PRIu64, ino);
 }
 
 static int _bf_parse_ipv4_addr(enum bf_matcher_type type, enum bf_matcher_op op,
@@ -1000,6 +1102,20 @@ static struct bf_matcher_meta _bf_matcher_metas[_BF_MATCHER_TYPE_MAX] = {
                                    _bf_parse_pid, _bf_print_pid),
                     BF_MATCHER_OPS(BF_MATCHER_IN, sizeof(uint32_t),
                                    _bf_parse_pid, _bf_print_pid),
+                },
+        },
+    [BF_MATCHER_META_PIDFD] =
+        {
+            .layer = BF_MATCHER_NO_LAYER,
+            .hdr_payload_size = sizeof(uint64_t),
+            .unsupported_hooks = BF_FLAGS_MASK(_BF_HOOK_MAX) &
+                                 ~(BF_FLAGS(_BF_HOOKS_CGROUP_SOCK_ADDR_ALL)),
+            .ops =
+                {
+                    BF_MATCHER_OPS(BF_MATCHER_EQ, sizeof(uint64_t),
+                                   _bf_parse_pidfd, _bf_print_pidfd),
+                    BF_MATCHER_OPS(BF_MATCHER_IN, sizeof(uint64_t),
+                                   _bf_parse_pidfd, _bf_print_pidfd),
                 },
         },
     [BF_MATCHER_IP4_SADDR] =
@@ -1791,6 +1907,7 @@ static const char *_bf_matcher_type_strs[] = {
     [BF_MATCHER_ICMPV6_CODE] = "icmpv6.code",
     [BF_MATCHER_SET] = "<set>",
     [BF_MATCHER_META_PID] = "meta.pid",
+    [BF_MATCHER_META_PIDFD] = "meta.pidfd",
 };
 
 static_assert_enum_mapping(_bf_matcher_type_strs, _BF_MATCHER_TYPE_MAX);

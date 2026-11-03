@@ -137,6 +137,7 @@ int bf_matcher_generate_meta(struct bf_program *program,
     case BF_MATCHER_META_FLOW_PROBABILITY:
         return _bf_matcher_generate_meta_flow_probability(program, matcher);
     case BF_MATCHER_META_PID:
+    case BF_MATCHER_META_PIDFD:
     case BF_MATCHER_META_SPORT:
     case BF_MATCHER_META_DPORT:
     case BF_MATCHER_META_MARK:

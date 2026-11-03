@@ -119,6 +119,9 @@ enum bf_matcher_type
     /// Matches the PID (thread group ID) of the process, as seen from the
     /// initial PID namespace.
     BF_MATCHER_META_PID,
+    /// Matches the process, identified by the inode number of its pidfd. Unlike
+    /// a PID, this number is not reused until the system reboots.
+    BF_MATCHER_META_PIDFD,
     _BF_MATCHER_TYPE_MAX,
 };
 

@@ -403,6 +403,7 @@ int bf_packet_gen_inline_matcher(struct bf_program *program,
     case BF_MATCHER_META_MARK:
     case BF_MATCHER_META_FLOW_HASH:
     case BF_MATCHER_META_PID:
+    case BF_MATCHER_META_PIDFD:
         return bf_err_r(-ENOTSUP,
                         "matcher '%s' is not supported by this flavor",
                         bf_matcher_type_to_str(bf_matcher_get_type(matcher)));

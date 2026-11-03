@@ -4,6 +4,12 @@
  */
 
 #include <arpa/inet.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/statfs.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include <bpfilter/flavor.h>
 #include <bpfilter/helper.h>
@@ -1256,6 +1262,139 @@ static void meta_pid_invalid(void **state)
                                        BF_MATCHER_IN, "not_a_pid", false));
 }
 
+static uint64_t _meta_pidfd_payload(const struct bf_matcher *matcher)
+{
+    uint64_t ino;
+
+    memcpy(&ino, bf_matcher_payload(matcher), sizeof(ino));
+
+    return ino;
+}
+
+// pidfd inode number of the calling process, or 0 if pidfds aren't pidfs inodes
+static uint64_t _meta_pidfd_self_ino(void)
+{
+    _cleanup_close_ int pidfd = (int)syscall(__NR_pidfd_open, getpid(), 0);
+    struct statfs fs_info;
+    struct stat pidfd_info;
+
+    if (pidfd < 0 || fstatfs(pidfd, &fs_info) || fs_info.f_type != 0x50494446 ||
+        fstat(pidfd, &pidfd_info))
+        return 0;
+
+    return (uint64_t)pidfd_info.st_ino;
+}
+
+static void meta_pidfd(void **state)
+{
+    _free_bf_matcher_ struct bf_matcher *matcher = NULL;
+    const struct bf_matcher_meta *meta;
+    const struct bf_matcher_ops *ops;
+    prefix_t prefix = {};
+    char raw_pid[16];
+    uint64_t self_ino;
+
+    (void)state;
+
+    // The inode number itself, as printed by bpfilter
+    assert_ok(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                      BF_MATCHER_EQ, "ino:1", false));
+    assert_int_equal(_meta_pidfd_payload(matcher), 1);
+    bf_matcher_free(&matcher);
+
+    assert_ok(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                      BF_MATCHER_EQ, "ino:18446744073709551615",
+                                      true));
+    assert_true(_meta_pidfd_payload(matcher) == UINT64_MAX);
+    assert_true(bf_matcher_get_negate(matcher));
+    bf_matcher_dump(matcher, &prefix);
+    bf_matcher_free(&matcher);
+
+    // Set elements are parsed and printed as the EQ payload
+    assert_ok(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                      BF_MATCHER_IN, "ino:4242", false));
+    assert_int_equal(_meta_pidfd_payload(matcher), 4242);
+    ops = bf_matcher_get_ops(BF_MATCHER_META_PIDFD, BF_MATCHER_IN);
+    assert_non_null(ops);
+    assert_non_null(ops->print);
+    ops->print(bf_matcher_payload(matcher));
+    bf_matcher_free(&matcher);
+
+    assert_null(bf_matcher_get_ops(BF_MATCHER_META_PIDFD, BF_MATCHER_RANGE));
+
+    // Set keys are built from `hdr_payload_size` bytes per component
+    meta = bf_matcher_get_meta(BF_MATCHER_META_PIDFD);
+    assert_non_null(meta);
+    assert_int_equal(meta->hdr_payload_size, sizeof(uint64_t));
+    assert_int_equal(meta->hdr_payload_size, ops->ref_payload_size);
+
+    // Only cgroup_sock_addr hooks are supported
+    assert_int_equal(meta->unsupported_hooks & ~BF_FLAGS_MASK(_BF_HOOK_MAX), 0);
+    for (enum bf_hook hook = 0; hook < _BF_HOOK_MAX; ++hook) {
+        assert_int_equal(!(meta->unsupported_hooks & BF_FLAG(hook)),
+                         bf_hook_to_flavor(hook) == BF_FLAVOR_CGROUP_SOCK_ADDR);
+    }
+
+    // A PID is resolved to the pidfd inode number of its process
+    self_ino = _meta_pidfd_self_ino();
+    if (!self_ino)
+        skip(); // pidfds are pidfs inodes since Linux 6.9
+
+    (void)snprintf(raw_pid, sizeof(raw_pid), "%d", getpid());
+    assert_ok(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                      BF_MATCHER_EQ, raw_pid, false));
+    assert_true(_meta_pidfd_payload(matcher) == self_ino);
+    bf_matcher_free(&matcher);
+
+    assert_ok(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                      BF_MATCHER_IN, raw_pid, false));
+    assert_true(_meta_pidfd_payload(matcher) == self_ino);
+}
+
+static void meta_pidfd_invalid(void **state)
+{
+    _free_bf_matcher_ struct bf_matcher *matcher = NULL;
+
+    (void)state;
+
+    // Inode numbers are non-zero decimal values
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "ino:0", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "ino:", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "ino:-1", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "ino:+1", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "ino:0x10", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "ino:12a", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ,
+                                       "ino:99999999999999999999999", false));
+
+    // PIDs are decimal values in [1, INT32_MAX]
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "0", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "-1", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "2147483648", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "0x10", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "12a", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "", false));
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_IN, "not_a_pid", false));
+
+    // No process can have this PID: it's above PID_MAX_LIMIT
+    assert_err(bf_matcher_new_from_raw(&matcher, BF_MATCHER_META_PIDFD,
+                                       BF_MATCHER_EQ, "2147483647", false));
+}
+
 static void new_from_raw_ip4_addr(void **state)
 {
     _free_bf_matcher_ struct bf_matcher *matcher = NULL;
@@ -2283,6 +2422,8 @@ int main(void)
         cmocka_unit_test(meta_mark_invalid),
         cmocka_unit_test(meta_pid),
         cmocka_unit_test(meta_pid_invalid),
+        cmocka_unit_test(meta_pidfd),
+        cmocka_unit_test(meta_pidfd_invalid),
         cmocka_unit_test(new_from_raw_ip4_addr),
         cmocka_unit_test(new_from_raw_ip6_addr),
         cmocka_unit_test(new_from_raw_port),

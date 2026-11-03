@@ -282,6 +282,43 @@ static ssize_t _bf_cgroup_sock_addr_ctx_offset(enum bf_matcher_type type)
     }
 }
 
+/**
+ * @brief Load the pidfd inode number of the current process into `BPF_REG_0`.
+ *
+ * pidfds are pidfs inodes, and the inode number is stored in the process'
+ * `struct pid`: `current->group_leader->thread_pid->ino`. The offsets come
+ * from the kernel's BTF, `bpf_get_current_task_btf()` returns a pointer the
+ * verifier lets the program walk.
+ *
+ * @param program Program to emit the instructions into. Can't be NULL.
+ * @return 0 on success, or a negative errno value on failure.
+ */
+static int _bf_cgroup_sock_addr_load_pidfd_ino(struct bf_program *program)
+{
+    int leader_off;
+    int pid_off;
+    int ino_off;
+
+    assert(program);
+
+    if ((leader_off = bf_btf_get_field_off("task_struct", "group_leader")) < 0)
+        return leader_off;
+    if ((pid_off = bf_btf_get_field_off("task_struct", "thread_pid")) < 0)
+        return pid_off;
+    if ((ino_off = bf_btf_get_field_off("pid", "ino")) < 0) {
+        return bf_err_r(ino_off,
+                        "meta.pidfd requires pidfs inode numbers in struct pid "
+                        "(Linux 6.9+)");
+    }
+
+    EMIT(program, BPF_EMIT_CALL(BPF_FUNC_get_current_task_btf));
+    EMIT(program, BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, leader_off));
+    EMIT(program, BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, pid_off));
+    EMIT(program, BPF_LDX_MEM(BPF_DW, BPF_REG_0, BPF_REG_0, ino_off));
+
+    return 0;
+}
+
 static int _bf_cgroup_sock_addr_generate_set(struct bf_program *program,
                                              const struct bf_matcher *matcher)
 {
@@ -344,6 +381,20 @@ static int _bf_cgroup_sock_addr_generate_set(struct bf_program *program,
             continue;
         }
 
+        if (type == BF_MATCHER_META_PIDFD) {
+            r = _bf_cgroup_sock_addr_load_pidfd_ino(program);
+            if (r)
+                return r;
+
+            r = bf_stub_store(program, BPF_REG_0, meta->hdr_payload_size,
+                              BF_PROG_SCR_OFF(offset));
+            if (r)
+                return r;
+
+            offset += meta->hdr_payload_size;
+            continue;
+        }
+
         if (ctx_off < 0) {
             return bf_err_r(
                 (int)ctx_off,
@@ -393,6 +444,15 @@ _bf_cgroup_sock_addr_gen_inline_matcher(struct bf_program *program,
         EMIT(program, BPF_ALU64_IMM(BPF_RSH, BPF_REG_0, 32));
         return bf_cmp_value(program, matcher, bf_matcher_payload(matcher), 4,
                             BPF_REG_0);
+    case BF_MATCHER_META_PIDFD: {
+        int r = _bf_cgroup_sock_addr_load_pidfd_ino(program);
+
+        if (r)
+            return r;
+
+        return bf_cmp_value(program, matcher, bf_matcher_payload(matcher), 8,
+                            BPF_REG_0);
+    }
     case BF_MATCHER_IP4_SADDR:
         return _bf_cgroup_sock_addr_load_and_cmp(
             program, matcher, offsetof(struct bpf_sock_addr, msg_src_ip4), 4);

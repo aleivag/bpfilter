@@ -26,7 +26,7 @@ The following hooks are supported:
 
 .. note::
 
-    ``BF_HOOK_CGROUP_SOCK_ADDR_*`` hooks operate on socket metadata rather than packet data. Supported matchers: ``meta.l3_proto``, ``meta.l4_proto``, ``meta.probability``, ``meta.dport``, ``meta.pid``, ``ip4.daddr``, ``ip4.dnet``, ``ip4.proto``, ``ip6.daddr``, ``ip6.dnet``, ``udp.dport``. Connect hooks additionally support ``tcp.dport``. Sendmsg hooks additionally support ``ip4.saddr``, ``ip4.snet``, ``ip6.saddr``, and ``ip6.snet``. Sets are supported with the same per-component restrictions: each set key component must be a matcher supported by the chain's hook. ``meta.dport`` is supported in sets, while ``meta.sport`` is unavailable on these hooks.
+    ``BF_HOOK_CGROUP_SOCK_ADDR_*`` hooks operate on socket metadata rather than packet data. Supported matchers: ``meta.l3_proto``, ``meta.l4_proto``, ``meta.probability``, ``meta.dport``, ``meta.pid``, ``meta.pidfd``, ``ip4.daddr``, ``ip4.dnet``, ``ip4.proto``, ``ip6.daddr``, ``ip6.dnet``, ``udp.dport``. Connect hooks additionally support ``tcp.dport``. Sendmsg hooks additionally support ``ip4.saddr``, ``ip4.snet``, ``ip6.saddr``, and ``ip6.snet``. Sets are supported with the same per-component restrictions: each set key component must be a matcher supported by the chain's hook. ``meta.dport`` is supported in sets, while ``meta.sport`` is unavailable on these hooks.
 
 
 Hook options

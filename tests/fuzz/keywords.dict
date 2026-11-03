@@ -101,6 +101,8 @@
 "meta.flow_hash"
 "meta.flow_probability"
 "meta.pid"
+"meta.pidfd"
+"ino:"
 
 # TCP flags
 "syn"

@@ -21,6 +21,8 @@ ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_C
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule meta.dport range 8000-9000 counter DROP"
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule meta.pid eq 1234 counter DROP"
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule meta.pid not 1234 counter DROP"
+${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule meta.pidfd eq ino:4242 counter DROP"
+${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule meta.pidfd not ino:4242 counter DROP"
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule ip4.daddr eq 1.1.1.1 counter DROP"
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule ip4.daddr not 10.0.0.1 counter DROP"
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule ip4.dnet eq 192.168.1.0/24 counter DROP"
@@ -56,6 +58,8 @@ ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_C
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule (ip4.daddr, meta.dport) in { 1.1.1.1, 80; 2.2.2.2, 443 } counter DROP"
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule (meta.pid) in { 1; 1234 } counter DROP"
 ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule (ip4.daddr, meta.pid) in { 1.1.1.1, 1; 2.2.2.2, 1234 } counter DROP"
+${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule (meta.pidfd) in { ino:1; ino:4242 } counter DROP"
+${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule (ip4.daddr, meta.pidfd) in { 1.1.1.1, ino:1; 2.2.2.2, ino:4242 } counter DROP"
 
 # Unsupported set components
 (! ${BFCLI} ruleset set --dry-run --from-str "chain test BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4 ACCEPT rule (ip4.saddr) in { 1.1.1.1 } counter DROP")
@@ -77,6 +81,20 @@ udp4_connect() {
 # Load the chain $1 from the connecting process, with "$$" replaced by its PID
 udp4_connect_self() {
     ${FROM_NS} bash -c "echo \$\$ > ${CGROUP_PATH}/cgroup.procs && ${BFCLI} chain set --from-str \"$1\" && echo 2>/dev/null > /dev/udp/$2/$3"
+}
+
+# Connect to $2:$3 from a new process in the test cgroup whose PID is $1: make
+# the kernel allocate $1 next, retrying if another process takes it. Exits with
+# 2 if the PID couldn't be reused.
+udp4_connect_as_pid() {
+    local r
+
+    for _ in $(seq 100); do
+        echo $(($1 - 1)) > /proc/sys/kernel/ns_last_pid
+        ${FROM_NS} bash -c "[ \$\$ = $1 ] || exit 2; echo \$\$ > ${CGROUP_PATH}/cgroup.procs && echo 2>/dev/null > /dev/udp/$2/$3" && return 0 || r=$?
+        [ ${r} -eq 2 ] || return ${r}
+    done
+    return 2
 }
 
 # meta.l3_proto
@@ -223,3 +241,53 @@ if [ "$(readlink /proc/self/ns/pid)" = "pid:[4026531836]" ]; then
     udp4_connect ${HOST_IP_ADDR} 9990
     test "$(get_counter c 0)" = "1"
 fi
+
+# meta.pidfd resolves a PID to its process through a pidfd (Linux 6.9+). Unlike
+# meta.pid, it doesn't depend on the PID namespace the rule is created from.
+if kernel_has_pidfs; then
+    # meta.pidfd eq: PID 1 never runs in the test cgroup
+    ${FROM_NS} ${BFCLI} chain set --from-str "chain c BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4{cgpath=${CGROUP_PATH}} ACCEPT rule meta.pidfd eq 1 counter DROP"
+    udp4_connect ${HOST_IP_ADDR} 9990
+    test "$(get_counter c 0)" = "0"
+
+    # meta.pidfd not
+    ${FROM_NS} ${BFCLI} chain set --from-str "chain c BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4{cgpath=${CGROUP_PATH}} ACCEPT rule meta.pidfd not 1 counter DROP"
+    (! udp4_connect ${HOST_IP_ADDR} 9990)
+    test "$(get_counter c 0)" = "1"
+
+    # meta.pidfd eq, with the PID of the connecting process
+    (! udp4_connect_self "chain c BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4{cgpath=${CGROUP_PATH}} ACCEPT rule meta.pidfd eq \$\$ counter DROP" ${HOST_IP_ADDR} 9990)
+    udp4_connect ${HOST_IP_ADDR} 9990
+    test "$(get_counter c 0)" = "1"
+
+    # (ip4.daddr, meta.pidfd) multi-component hash set, with the PID of the connecting process
+    (! udp4_connect_self "chain c BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4{cgpath=${CGROUP_PATH}} ACCEPT rule (ip4.daddr, meta.pidfd) in { ${HOST_IP_ADDR}, \$\$ } counter DROP" ${HOST_IP_ADDR} 9990)
+    udp4_connect ${HOST_IP_ADDR} 9990
+    test "$(get_counter c 0)" = "1"
+
+    # (meta.dport, meta.pidfd): match on a misaligned meta.pidfd set key component
+    (! udp4_connect_self "chain c BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4{cgpath=${CGROUP_PATH}} ACCEPT rule (meta.dport, meta.pidfd) in { 9990, \$\$ } counter DROP" ${HOST_IP_ADDR} 9990)
+    udp4_connect ${HOST_IP_ADDR} 9991
+    test "$(get_counter c 0)" = "1"
+
+    # (ip4.proto, meta.pidfd): match on an odd-offset meta.pidfd set key component
+    (! udp4_connect_self "chain c BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4{cgpath=${CGROUP_PATH}} ACCEPT rule (ip4.proto, meta.pidfd) in { udp, \$\$ } counter DROP" ${HOST_IP_ADDR} 9990)
+    udp4_connect ${HOST_IP_ADDR} 9990
+    test "$(get_counter c 0)" = "1"
+
+    # The PID of an exited process can be reused, its pidfd inode number can't:
+    # the rule doesn't match the next process with the same PID.
+    if [ -w /proc/sys/kernel/ns_last_pid ]; then
+        ${FROM_NS} sleep 1 &
+        pid=$!
+        ${FROM_NS} ${BFCLI} chain set --from-str "chain c BF_HOOK_CGROUP_SOCK_ADDR_CONNECT4{cgpath=${CGROUP_PATH}} ACCEPT rule meta.pidfd eq ${pid} counter DROP"
+        wait ${pid}
+        r=0
+        udp4_connect_as_pid ${pid} ${HOST_IP_ADDR} 9990 || r=$?
+        if [ ${r} -ne 2 ]; then
+            test ${r} -eq 0
+            test "$(get_counter c 0)" = "0"
+        fi
+    fi
+fi
+
